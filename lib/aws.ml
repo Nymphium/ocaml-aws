@@ -601,10 +601,9 @@ module Signing = struct
         ]
     in
     let headers =
-      ("x-amz-date", amzdate)
-      :: ("x-amz-content-sha256", payload_hash)
-      :: ("Authorization", authorization_header)
-      :: headers
+      canonical_headers
+      @ ["Authorization", authorization_header]
+      @ headers
     in
     let full_headers =
       match token with
@@ -613,12 +612,17 @@ module Signing = struct
     in
     meth, uri, full_headers
 
+<<<<<<< HEAD
   let sign_v2_request ~access_key ~secret_key ?token ~service ~region (meth, uri, headers)
       =
+=======
+  let sign_v2_request ~access_key ~secret_key ?session_token ~service ~region (meth, uri, headers) =
+>>>>>>> bda6e1b4 (support for authentification using temporary session tokens)
     let host = Util.of_option_exn (Endpoints.endpoint_of service region) in
     let amzdate = Time.date_time_iso8601 (Time.now_utc ()) in
 
     let query =
+<<<<<<< HEAD
       Uri.add_query_params'
         uri
         ((match token with
@@ -629,6 +633,15 @@ module Signing = struct
           ; "SignatureMethod", "HmacSHA256"
           ; "SignatureVersion", "2"
           ])
+=======
+      let params = [ "Timestamp", amzdate
+                  ; "AWSAccessKeyId", access_key
+                  ; "SignatureMethod", "HmacSHA256"
+                  ; "SignatureVersion", "2"
+                  ]
+                  @ match session_token with None -> [] | Some t -> ["SecurityToken", t]
+      in Uri.add_query_params' uri params
+>>>>>>> bda6e1b4 (support for authentification using temporary session tokens)
     in
 
     let params = encode_query (Uri.query query) in
