@@ -25,9 +25,11 @@ let string_of_meth = function
 
 type headers = (string * string) list
 
+type body = string option
+
 type signature_version =
   | V4
   | V2
   | S3
 
-type t = meth * Uri.t * headers
+type t = meth * Uri.t * headers * body

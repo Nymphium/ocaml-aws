@@ -100,7 +100,7 @@ let types is_ec2 shapes =
                (fun m ->
                  ( m.Structure.field_name
                  , String.capitalize_ascii m.Structure.shape ^ ".t"
-                 , m.Structure.required || is_list ~shapes ~shp:m.Structure.shape ))
+                 , m.Structure.required ))
                members)
       | Shape.List (shp, _, _flatten) -> Syntax.tylet "t" (Syntax.ty1 "list" (shp ^ ".t"))
       | Shape.Map ((kshp, _loc), (vshp, _)) ->
@@ -118,13 +118,7 @@ let types is_ec2 shapes =
             match args with
             | [] -> body
             | x :: xs ->
-                let fn =
-                  if x.Structure.required
-                  then Syntax.funlab
-                  else if is_list ~shapes ~shp:x.Structure.shape
-                  then Syntax.(funopt_def (list []))
-                  else Syntax.funopt
-                in
+                let fn = if x.Structure.required then Syntax.funlab else Syntax.funopt in
                 fn x.Structure.field_name (mkfun xs body)
           in
           let body =
@@ -214,8 +208,6 @@ let types is_ec2 shapes =
                 let op =
                   if mem.Structure.required
                   then Syntax.(app2 "Xml.required" (str loc_name) b)
-                  else if is_list ~shapes ~shp:mem.Structure.shape
-                  then Syntax.(app2 "Util.of_option" (list []) b)
                   else b
                 in
                 mem.Structure.field_name, op)
@@ -294,7 +286,6 @@ let types is_ec2 shapes =
                                         arg))
                               in
                               if mem.Structure.required
-                                 || is_list ~shapes ~shp:mem.Structure.shape
                               then
                                 app1 "Some" (q (ident ("v." ^ mem.Structure.field_name)))
                               else
@@ -335,16 +326,20 @@ let types is_ec2 shapes =
                       (list
                          (List.map
                             (fun mem ->
+                              let location =
+                                match mem.Structure.loc_name with
+                                | Some name -> name
+                                | None -> mem.Structure.name
+                              in
                               let q arg =
                                 pair
-                                  (str mem.Structure.field_name)
+                                  (str location)
                                   (app1
                                      (String.capitalize_ascii mem.Structure.shape
                                      ^ ".to_json")
                                      arg)
                               in
                               if mem.Structure.required
-                                 || is_list ~shapes ~shp:mem.Structure.shape
                               then
                                 app1 "Some" (q (ident ("v." ^ mem.Structure.field_name)))
                               else
@@ -392,9 +387,13 @@ let types is_ec2 shapes =
                  record
                    (List.map
                       (fun mem ->
+                        let location =
+                          match mem.Structure.loc_name with
+                          | Some name -> name
+                          | None -> mem.Structure.name
+                        in
                         ( mem.Structure.field_name
                         , (if mem.Structure.required
-                              || is_list ~shapes ~shp:mem.Structure.shape
                           then
                             fun v ->
                             app1
@@ -406,10 +405,7 @@ let types is_ec2 shapes =
                               "Util.option_map"
                               v
                               (ident (mem.Structure.shape ^ ".of_json")))
-                            (app2
-                               "Json.lookup"
-                               (ident "j")
-                               (str mem.Structure.field_name)) ))
+                            (app2 "Json.lookup" (ident "j") (str location)) ))
                       s)
              | Shape.List (shp, _, _flatten) ->
                  app2 "Json.to_list" (ident (shp ^ ".of_json")) (ident "j")
@@ -434,6 +430,7 @@ let types is_ec2 shapes =
   let modules = List.map build_module (toposort shapes) in
   let imports =
     [ Syntax.open_ "Aws"
+    ; Syntax.modlet "Query" "Aws.Query"
     ; Syntax.open_ "Aws.BaseTypes"
     ; Syntax.open_ "CalendarLib"
     ; Syntax.(tylet "calendar" (ty0 "Calendar.t"))
@@ -441,101 +438,86 @@ let types is_ec2 shapes =
   in
   imports @ modules
 
-let op service version _shapes op signature_version =
+let op service version target_prefix _shapes op signature_version =
   let open Syntax in
-  let mkty = function
-    | None -> ty0 "unit"
-    | Some shp -> ty0 (shp ^ ".t")
+  let with_types shp fld = String.concat "." [ "Types"; shp; fld ] in
+  let headers =
+    list
+      (match target_prefix with
+      | Some _ -> [ tuple [ str "x-amz-target"; ident "target" ] ]
+      | None -> [])
   in
-  let defaults =
+  let default_params =
     list
       [ pair (str "Action") (list [ str op.Operation.name ])
       ; pair (str "Version") (list [ str version ])
       ]
   in
+  let params, body =
+    match op.Operation.input_shape with
+    | None -> default_params, ident "None"
+    | Some input_shape ->
+        let params =
+          app2
+            "List.append"
+            default_params
+            (app1
+               "Util.drop_empty"
+               (app1
+                  "Uri.query_of_encoded"
+                  (app1
+                     "Query.render"
+                     (app1 (with_types input_shape "to_query") (ident "req")))))
+        in
+        let body =
+          app1
+            "Some"
+            (app1
+               "Aws.Json.to_string"
+               (app1 (with_types input_shape "to_json") (ident "req")))
+        in
+        params, body
+  in
   let to_body =
     letin
-      "uri"
-      (app2
-         "Uri.add_query_params"
-         (app1
-            "Uri.of_string"
+      "body"
+      body
+      (letin
+         "uri"
+         (app2
+            "Uri.add_query_params"
             (app1
-               "Aws.Util.of_option_exn"
-               (app2 "Endpoints.url_of" (ident "service") (ident "region"))))
-         (match op.Operation.input_shape with
-         | None -> defaults
-         | Some input_shape ->
-             app2
-               "List.append"
-               defaults
+               "Uri.of_string"
                (app1
-                  "Util.drop_empty"
-                  (app1
-                     "Uri.query_of_encoded"
-                     (app1
-                        "Query.render"
-                        (app1 (input_shape ^ ".to_query") (ident "req")))))))
-      (tuple [ variant op.Operation.http_meth; ident "uri"; list [] ])
+                  "Aws.Util.of_option_exn"
+                  (app2 "Endpoints.url_of" (ident "service") (ident "region"))))
+            params)
+         (tuple [ variant op.Operation.http_meth; ident "uri"; headers; ident "body" ]))
   in
+  (* XXX(serious): assume xml -> json by default  *)
   let of_body =
     match op.Operation.output_shape with
-    | None -> variant1 "Ok" (ident "()")
+    | None -> variant1 "Ok" (variant1 "Assoc" (list []))
     | Some shp ->
-        tryfail
-          (letin
-             "xml"
-             (app1 "Ezxmlm.from_string" (ident "body"))
-             (letin
-                "resp"
-                (let r =
-                   app2
-                     "Xml.member"
-                     (str (op.Operation.name ^ "Response"))
-                     (app1 "snd" (ident "xml"))
-                 in
-                 match op.Operation.output_wrapper with
-                 | None -> r
-                 | Some w -> app2 "Util.option_bind" r (app1 "Xml.member" (str w)))
-                (try_msg
-                   "Xml.RequiredFieldMissing"
-                   (app2
-                      "Util.or_error"
-                      (app2 "Util.option_bind" (ident "resp") (ident (shp ^ ".parse")))
-                      (letom
-                         "Error"
-                         (app1
-                            "BadResponse"
-                            (record
-                               [ "body", ident "body"
-                               ; "message", str ("Could not find well formed " ^ shp ^ ".")
-                               ]))))
-                   (letom
-                      "Error"
-                      (variant1
-                         "Error"
-                         (app1
-                            "BadResponse"
-                            (record
-                               [ "body", ident "body"
-                               ; ( "message"
-                                 , app2
-                                     "^"
-                                     (str
-                                        ("Error parsing "
-                                        ^ shp
-                                        ^ " - missing field in body or children: "))
-                                     (ident "msg") )
-                               ])))))))
-          (variant1
+        try_msg
+          "Json.Parse_error"
+          (variant1 "Ok" (app1 "Json.of_string" (ident "body")))
+          (letom
              "Error"
-             (letom
+             (variant1
                 "Error"
                 (app1
                    "BadResponse"
                    (record
                       [ "body", ident "body"
-                      ; "message", app2 "^" (str "Error parsing xml: ") (ident "msg")
+                      ; ( "message"
+                        , app2
+                            "^"
+                            (str
+                               ("Error parsing "
+                               ^ shp
+                               ^ " - missing field in body or children: "))
+                            (ident "msg") )
                       ]))))
   in
   let op_error_parse =
@@ -562,28 +544,38 @@ let op service version _shapes op signature_version =
             (ident "None"))
          (ident "None"))
   in
+  let unit = ty0 "unit" in
+  let input_type =
+    match op.Operation.input_shape with
+    | Some i -> ty0 (with_types i "t")
+    | None -> unit
+  in
+  let output_type = ty0 "Aws.Json.t" in
   (* Tuple corresponding to (mli, ml) *)
-  ( [ sopen_ "Types"
-    ; stylet "input" (mkty op.Operation.input_shape)
-    ; stylet "output" (mkty op.Operation.output_shape)
+  ( [ stylet "input" input_type
+    ; stylet "output" output_type
     ; stylet "error" (ty0 "Errors_internal.t")
     ; sinclude_
         "Aws.Call"
         [ withty "input" "input"; withty "output" "output"; withty "error" "error" ]
     ]
-  , [ open_ "Types"
-    ; open_ "Aws"
-    ; tylet "input" (mkty op.Operation.input_shape)
-    ; tylet "output" (mkty op.Operation.output_shape)
+  , [ open_ "Aws"
+    ; tylet "input" input_type
+    ; tylet "output" output_type
     ; tylet "error" (ty0 "Errors_internal.t")
     ; let_ "service" (str service)
-    ; let_
-        "signature_version"
-        (ident ("Request." ^ String.capitalize_ascii signature_version))
-    ; let_ "to_http" (fun3 "service" "region" "req" to_body)
-    ; let_ "of_http" (fun_ "body" of_body)
-    ; let_ "parse_error" (fun2 "code" "err" op_error_parse)
-    ] )
+    ]
+    @ (match target_prefix with
+      | Some target_prefix ->
+          [ let_ "target" (str (String.concat "." [ target_prefix; op.Operation.name ])) ]
+      | None -> [])
+    @ [ let_
+          "signature_version"
+          (ident ("Request." ^ String.capitalize_ascii signature_version))
+      ; let_ "to_http" (fun3 "service" "region" "req" to_body)
+      ; let_ "of_http" (fun_ "body" of_body)
+      ; let_ "parse_error" (fun2 "code" "err" op_error_parse)
+      ] )
 
 let errors errs common_errors =
   let errs =

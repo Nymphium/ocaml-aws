@@ -39,7 +39,8 @@ let encode_query ps =
 (* NOTE(dbp 2015-01-13): This is a direct translation of reference implementation at:
  * http://docs.aws.amazon.com/general/latest/gr/sigv4-signed-request-examples.html
  *)
-let sign_request ~access_key ~secret_key ?token ~service ~region (meth, uri, headers) =
+let sign_request ~access_key ~secret_key ?token ~service ~region (meth, uri, headers, body)
+    =
   let host = Util.of_option_exn (Endpoints.endpoint_of service region) in
   let params = encode_query (Uri.query uri) in
   let sign key msg = Hash.sha256 ~key msg in
@@ -128,9 +129,15 @@ let sign_request ~access_key ~secret_key ?token ~service ~region (meth, uri, hea
     | Some t -> ("X-Amz-Security-Token", t) :: headers
     | None -> headers
   in
-  meth, uri, full_headers
+  meth, uri, full_headers, body
 
-let sign_v2_request ~access_key ~secret_key ?token ~service ~region (meth, uri, headers) =
+let sign_v2_request
+    ~access_key
+    ~secret_key
+    ?token
+    ~service
+    ~region
+    (meth, uri, headers, body) =
   let host = Util.of_option_exn (Endpoints.endpoint_of service region) in
   let amzdate = Time.date_time_iso8601 (Time.now_utc ()) in
 
@@ -154,4 +161,4 @@ let sign_v2_request ~access_key ~secret_key ?token ~service ~region (meth, uri, 
   in
   let signature = Base64.encode_string @@ Hash.sha256 ~key:secret_key string_to_sign in
   let new_uri = Uri.add_query_param' query ("Signature", signature) in
-  meth, new_uri, headers
+  meth, new_uri, headers, body

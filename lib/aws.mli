@@ -102,13 +102,16 @@ module Request : sig
   type headers = (string * string) list
   (** HTTP headers. *)
 
+  type body = string option
+  (** HTTP POST request body. *)
+
   type signature_version =
     | V4
     | V2
     | S3  (** Signature version *)
 
-  type t = meth * Uri.t * headers
-  (** A request is a method, a uri, and a list of headers. *)
+  type t = meth * Uri.t * headers * body
+  (** A request is a method, a uri, a headers, and a request body. *)
 end
 
 (** All AWS api operations should have type Call. Runtime
@@ -240,6 +243,21 @@ module Json : sig
   exception Casting_error of string * t
   (** This is thrown in the case that an unsafe cast (like to_list
       below) fails. *)
+
+  exception Parse_error of string
+  (** This is thrown in the case that an unsafe parse (like to_string
+      below fails. *)
+
+  val to_yojson : t -> Yojson.Basic.t
+
+  val of_yojson : Yojson.Basic.t -> t
+
+  val to_string : t -> string
+  (** This converts a json to string. *)
+
+  val of_string : string -> t
+  (** This convert a string to json, or throws a Parsing_error
+      in the case that the input is not a valid json string. *)
 
   val to_list : (t -> 't) -> t -> 't list
   (** This converts a `List (t list) to 't list, or throws a

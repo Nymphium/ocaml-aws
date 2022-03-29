@@ -119,15 +119,8 @@ let op (_nm, j) : Operation.t =
   let http_meth = Json.(member_exn "method" http |> to_string) in
   let http_uri = Json.(member_exn "requestUri" http |> to_string) in
   let input_shape =
-    (* XXX(seliopou): There are some API calls that take no arguments. For
-     * example, [DescribeAccountLimits] from the autoscaling API is one such
-     * call. As a quick fix, the aws library now includes [unit] in its base
-     * types, and the input shape for API calls that do not take arguments now
-     * directly references that type. This decision should be revisited in the
-     * future.
-     *)
     match Json.member "input" j with
-    | `Null -> Some "Aws.BaseTypes.Unit"
+    | `Null -> None
     | input -> Some Json.(member_exn "shape" input |> to_string)
   in
   let output_shape =

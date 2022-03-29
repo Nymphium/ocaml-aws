@@ -158,6 +158,7 @@ let main input override errors_path outdir is_ec2 (optional_libs : string list) 
   let ops_json = Json.(member_exn "operations" desc |> to_assoc) in
   let shp_json = Json.(member_exn "shapes" desc |> to_assoc) in
   let lib_name = Json.(member_exn "endpointPrefix" meta |> to_string) in
+  let target_prefix = Json.(member "targetPrefix" meta |> function `Null -> None | s -> Some (to_string s)) in
   let lib_name_dir = lib_name' meta in
   let service_name = Json.(member_exn "serviceFullName" meta |> to_string) in
   let api_version = Json.(member_exn "apiVersion" meta |> to_string) in
@@ -227,7 +228,7 @@ let main input override errors_path outdir is_ec2 (optional_libs : string list) 
   log "## Wrote %d error variants..." (List.length errors);
   List.iter
     (fun op ->
-      let mli, ml = Generate.op lib_name api_version shapes op signature_version in
+      let mli, ml = Generate.op lib_name api_version target_prefix shapes op signature_version in
       let modname = uncapitalize op.Operation.name in
       Printing.write_signature (lib_dir </> modname ^ ".mli") mli;
       Printing.write_structure (lib_dir </> modname ^ ".ml") ml)

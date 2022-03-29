@@ -144,7 +144,10 @@ let record fs = Exp.record (List.map (fun (nm, exp) -> lid nm, exp) fs) None
 let ident i = Exp.ident (lid i)
 
 (* f a *)
-let app1 f a = Exp.apply (ident f) [ Nolabel, a ]
+let app1' f a = Exp.apply f [ Nolabel, a ]
+
+(* f a *)
+let app1 f a = app1' (ident f) a
 
 (* f a0 a1 *)
 let app2 f a0 a1 = Exp.apply (ident f) [ Nolabel, a0; Nolabel, a1 ]
