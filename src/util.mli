@@ -72,3 +72,6 @@ val filter_map : 'a list -> f:('a -> 'b option) -> 'b list
 val option_map : string option -> f:string -> string option
 
 val of_option_exn : 'a option -> 'a
+
+val string_ends_with : string -> string -> bool
+(** It is ported from stdlib in OCaml 4.13. *)

@@ -229,16 +229,7 @@ end
 (** This module contains a Json type (compatible with
     Yojson.Basic.t) and helpers. *)
 module Json : sig
-  type t =
-    [ `Assoc of (string * t) list
-    | `Bool of bool
-    | `Float of float
-    | `Int of int
-    | `List of t list
-    | `Null
-    | `String of string
-    ]
-  (** Json type. This is compatible with Yojson.Basic.t *)
+  type t = Yojson.Basic.t
 
   exception Casting_error of string * t
   (** This is thrown in the case that an unsafe cast (like to_list
@@ -247,10 +238,6 @@ module Json : sig
   exception Parse_error of string
   (** This is thrown in the case that an unsafe parse (like to_string
       below fails. *)
-
-  val to_yojson : t -> Yojson.Basic.t
-
-  val of_yojson : Yojson.Basic.t -> t
 
   val to_string : t -> string
   (** This converts a json to string. *)

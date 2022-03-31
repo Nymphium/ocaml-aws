@@ -41,6 +41,8 @@ let strloc txt = { txt; loc = !default_loc }
 (* open Module (in .ml) *)
 let open_ nm = Str.open_ (Opn.mk (Mod.ident (lid nm)))
 
+let mrec_ l = Str.rec_module l
+
 (* open Module (in .mli) *)
 let sopen_ nm = Sig.open_ (Opn.mk (lid nm))
 
@@ -57,6 +59,12 @@ let modlet nm1 nm2 =
 (* nm (as a type) *)
 let ty0 nm = Typ.constr (lid nm) []
 
+let label str = Labelled str
+
+let labelopt str = Optional str
+
+let tyfun ?(label = Nolabel) a b = Typ.arrow label a b
+
 (* nm2 nm1 (as a type) *)
 let ty1 nm1 nm2 = Typ.constr (lid nm1) [ ty0 nm2 ]
 
@@ -64,36 +72,47 @@ let ty1 nm1 nm2 = Typ.constr (lid nm1) [ ty0 nm2 ]
 let ty2 nm1 nm2 nm3 = Typ.constr (lid nm1) [ ty0 nm2; ty0 nm3 ]
 
 (* type nm = { fs.. } *)
-let tyreclet nm fs =
-  Str.type_
-    Recursive
-    [ Type.mk
-        ~kind:(Ptype_record (List.map (fun (nm, ty) -> Type.field (strloc nm) ty) fs))
-        (strloc nm)
-    ]
+let tyreclet' nm fs =
+  Type.mk
+    ~kind:(Ptype_record (List.map (fun (nm, ty) -> Type.field (strloc nm) ty) fs))
+    (strloc nm)
+
+let tyreclet nm fs = Str.type_ Recursive [ tyreclet' nm fs ]
+
+let tyunit' nm = Type.mk ~manifest:(ty0 "unit") (strloc nm)
 
 (* type nm = unit *)
-let tyunit nm = Str.type_ Recursive [ Type.mk ~manifest:(ty0 "unit") (strloc nm) ]
+let tyunit nm = Str.type_ Recursive [ tyunit' nm ]
+
+let tylet' nm ty = Type.mk ~manifest:ty (strloc nm)
 
 (* type nm = ty (in .ml) *)
-let tylet nm ty = Str.type_ Recursive [ Type.mk ~manifest:ty (strloc nm) ]
+let tylet nm ty = Str.type_ Recursive [ tylet' nm ty ]
+
+let tyvariantlet' nm variants =
+  Type.mk
+    ~kind:
+      (Ptype_variant
+         (List.map
+            (fun (cnm, args) -> Type.constructor ~args:(Pcstr_tuple args) (strloc cnm))
+            variants))
+    (strloc nm)
 
 (* type nm = | nm0 of ty0 | ... *)
-let tyvariantlet nm variants =
-  Str.type_
-    Recursive
-    [ Type.mk
-        ~kind:
-          (Ptype_variant
-             (List.map
-                (fun (cnm, args) ->
-                  Type.constructor ~args:(Pcstr_tuple args) (strloc cnm))
-                variants))
-        (strloc nm)
-    ]
+let tyvariantlet nm variants = Str.type_ Recursive [ tyvariantlet' nm variants ]
+
+let stylet' nm ty = Type.mk ~manifest:ty (strloc nm)
 
 (* type nm = ty (in .mli) *)
-let stylet nm ty = Sig.type_ Recursive [ Type.mk ~manifest:ty (strloc nm) ]
+let stylet nm ty = Sig.type_ Recursive [ tylet' nm ty ]
+
+let ty_ t = Str.type_ Recursive [ t ]
+
+let sty_ t = Sig.type_ Recursive [ t ]
+
+let nonrecty_ t = Str.type_ Nonrecursive [ t ]
+
+let snonrecty_ t = Sig.type_ Nonrecursive [ t ]
 
 (* let nm = body *)
 let let_ nm body = Str.value Nonrecursive [ Vb.mk (Pat.var (strloc nm)) body ]
@@ -195,6 +214,18 @@ let module_ nm vs =
 #endif
   Str.module_ (Mb.mk (strloc nm) (Mod.structure vs))
 
+let sigval nm ty = Sig.value (Val.mk (strloc nm) ty)
+
+let sigty nm ty = Sig.type_ Recursive [ Type.mk ~manifest:ty (strloc nm) ]
+
+let sig_ ss = Mty.signature ss
+
+let module'_ nm vs sig_ = Mb.mk (strloc (Some nm)) Mod.(constraint_ (structure vs) sig_)
+
+let module__ = Str.module_
+
+let rec_module_ l = Str.rec_module l
+
 (* try body with _ -> with_ *)
 let try_ body with_ = Exp.try_ body [ Exp.case (Pat.any ()) with_ ]
 
@@ -227,7 +258,7 @@ let ifthen cond thn els = Exp.ifthenelse cond thn (Some els)
 
 let match_ = Exp.match_
 
-let casearm ?guard lid pat body = Exp.case (Pat.construct lid pat) ?guard body
+let casearm ?guard lid pat body = Exp.case (construct lid pat) ?guard body
 
 let pvar v = Pat.var (strloc v)
 

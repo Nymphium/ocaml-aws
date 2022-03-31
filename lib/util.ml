@@ -1,4 +1,4 @@
-let drop_empty l = List.filter (fun p -> String.length (String.trim (fst p)) <> 0) l
+let drop_empty l = List.filter (fun (k, _) -> String.length (String.trim k) <> 0) l
 
 let or_error v err =
   match v with
@@ -13,29 +13,17 @@ let of_option_exn = function
   | Some v -> v
   | None -> failwith "Expected Some v, got None."
 
-let rec list_find l key =
-  match l with
-  | [] -> None
-  | (k, v) :: xs -> if k = key then Some v else list_find xs key
+let list_find l key = List.find_map (fun (k, v) -> if key = k then Some v else None) l
 
-let rec list_filter_opt = function
-  | [] -> []
-  | Some v :: xs -> v :: list_filter_opt xs
-  | None :: xs -> list_filter_opt xs
+let list_filter_opt l = List.filter_map (fun v -> v) l
 
-let option_bind o f =
-  match o with
-  | None -> None
-  | Some v -> f v
+let option_bind o f = Option.bind o f
 
-let option_map v f =
-  match v with
-  | None -> None
-  | Some v -> Some (f v)
+let option_map v f = Option.map f v
 
 let rec option_all = function
   | [] -> Some []
-  | Some v :: xs -> option_bind (option_all xs) (fun rest -> Some (v :: rest))
+  | Some v :: xs -> Option.bind (option_all xs) (fun rest -> Some (v :: rest))
   | None :: _ -> None
 
 let string_starts_with prefix s =

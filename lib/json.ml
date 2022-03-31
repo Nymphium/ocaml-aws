@@ -1,20 +1,8 @@
-type t =
-  [ `Assoc of (string * t) list
-  | `Bool of bool
-  | `Float of float
-  | `Int of int
-  | `List of t list
-  | `Null
-  | `String of string
-  ]
+type t = Yojson.Basic.t
 
 exception Casting_error of string * t
 
 exception Parse_error of string
-
-let to_yojson t = t
-
-let of_yojson t = t
 
 let to_list f = function
   | `List l -> List.map f l

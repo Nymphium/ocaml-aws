@@ -33,6 +33,31 @@
 
 open Structures
 open Util
+open Graphlib.Std
+
+module E : Regular.Std.Opaque.S with type t = Shape.t = struct
+  type t = Shape.t
+
+  include Regular.Std.Opaque.Make (struct
+    type nonrec t = t
+
+    let compare a b = compare a.Shape.name b.Shape.name
+
+    let hash a = Hashtbl.hash a.Shape.name
+  end)
+end
+
+module G = Graphlib.Make (E) (Core.Unit)
+
+module Gf = Graph.Persistent.Digraph.ConcreteBidirectional (struct
+  type t = E.t Group.t
+
+  let compare g g' = E.compare (Group.top g) (Group.top g')
+
+  let hash g = E.hash (Group.top g)
+
+  let equal g g' = E.equal (Group.top g) (Group.top g')
+end)
 
 let is_list ~shapes ~shp =
   try
@@ -48,37 +73,57 @@ let is_flat_list ~shapes ~shp =
     | _ -> false
   with Not_found -> false
 
-let toposort (shapes : Shape.t StringTable.t) =
-  let open Graph in
-  let module G = Imperative.Digraph.ConcreteBidirectional (struct
-    type t = Shape.t
+let members = function
+  | Shape.Structure members -> List.map (fun mem -> mem.Structure.shape) members
+  | Shape.List (s, _, _) -> [ s ]
+  | Shape.Map ((ks, _), (vs, _)) -> [ ks; vs ]
+  | Shape.Enum _ -> []
 
-    let compare a b = compare a.Shape.name b.Shape.name
-
-    let hash a = Hashtbl.hash a.Shape.name
-
-    let equal a b = a.Shape.name = b.Shape.name
-  end) in
-  let graph = G.create () in
-  let add_edge from to_ =
-    try G.add_edge graph from (StringTable.find to_ shapes) with Not_found -> ()
+(** Make strongly-connected component to resolve module dependencies and recursivities *)
+let scc (shapes : Shape.t StringTable.t) =
+  let nodes = StringTable.fold (Fun.const List.cons) shapes [] in
+  let edges =
+    ListLabels.fold_left nodes ~init:[] ~f:(fun edges shp ->
+        ListLabels.fold_left ~init:edges ~f:(fun edges mem ->
+            StringTable.find_opt mem shapes
+            |> function
+            | Some shp' -> (shp, shp', ()) :: edges
+            | None -> edges)
+        @@ members shp.Shape.content)
   in
-  StringTable.iter
-    (fun _key data ->
-      G.add_vertex graph data;
-      match data.Shape.content with
-      | Shape.Structure members ->
-          List.iter (fun mem -> add_edge data mem.Structure.shape) members
-      | Shape.List (s, _, _) -> add_edge data s
-      | Shape.Map ((ks, _), (vs, _)) ->
-          add_edge data ks;
-          add_edge data vs
-      | Shape.Enum _ -> ())
-    shapes;
-  let module T = Topological.Make (G) in
-  let out = ref [] in
-  T.iter (fun shape -> out := shape :: !out) graph;
-  !out
+  let module Seq = Regular.Std.Seq in
+  let graph =
+    Graphlib.create (module G) ~edges ~nodes () |> Graphlib.strong_components (module G)
+  in
+  let graph' =
+    Seq.fold (Partition.groups graph) ~init:Gf.empty ~f:(fun graph' g ->
+        let top = Group.top g in
+        ListLabels.fold_left
+          (members top.Shape.content)
+          ~init:(Gf.add_vertex graph' g)
+          ~f:(fun graph' mem ->
+            StringTable.find_opt mem shapes
+            |> Fun.flip Option.bind (fun shp ->
+                   Partition.group graph shp |> Option.map (Gf.add_edge graph' g))
+            |> function
+            | Some graph' -> graph'
+            | None -> graph'))
+  in
+  let module T = Graph.Topological.Make (Gf) in
+  T.fold
+    (fun g acc ->
+      let top = Group.top g in
+      let is_rec =
+        Group.enum g
+        |> Seq.to_list
+        |> ListLabels.fold_left ~init:false ~f:(fun b shp ->
+               b
+               || (List.exists (String.equal top.Shape.name) @@ members shp.Shape.content))
+      in
+      (if is_rec then `Rec (Group.enum g |> Seq.to_list) else `Nonrec (Group.top g))
+      :: acc)
+    graph'
+    []
 
 let types is_ec2 shapes =
   let option_type shp = function
@@ -87,13 +132,13 @@ let types is_ec2 shapes =
   in
   let build_module v =
     let mkrecty fs =
-      Syntax.tyreclet "t" (List.map (fun (nm, shp, req) -> nm, option_type shp req) fs)
+      Syntax.tyreclet' "t" (List.map (fun (nm, shp, req) -> nm, option_type shp req) fs)
     in
     let ty =
       match v.Shape.content with
       | Shape.Structure [] ->
           (* Hack for a unit type since empty records aren't yet valid *)
-          Syntax.tyunit "t"
+          Syntax.tyunit' "t"
       | Shape.Structure members ->
           mkrecty
             (List.map
@@ -102,17 +147,16 @@ let types is_ec2 shapes =
                  , String.capitalize_ascii m.Structure.shape ^ ".t"
                  , m.Structure.required ))
                members)
-      | Shape.List (shp, _, _flatten) -> Syntax.tylet "t" (Syntax.ty1 "list" (shp ^ ".t"))
+      | Shape.List (shp, _, _flatten) ->
+          Syntax.tylet' "t" (Syntax.ty1 "list" (shp ^ ".t"))
       | Shape.Map ((kshp, _loc), (vshp, _)) ->
-          Syntax.tylet "t" (Syntax.ty2 "Hashtbl.t" (kshp ^ ".t") (vshp ^ ".t"))
+          Syntax.tylet' "t" (Syntax.ty2 "Hashtbl.t" (kshp ^ ".t") (vshp ^ ".t"))
       | Shape.Enum opts ->
-          Syntax.tyvariantlet "t" (List.map (fun t -> Util.to_variant_name t, []) opts)
+          Syntax.tyvariantlet' "t" (List.map (fun t -> Util.to_variant_name t, []) opts)
     in
-    let make =
+    let make, tymake =
       match v.Shape.content with
-      | Shape.Structure [] ->
-          let body = Syntax.(fununit (unit ())) in
-          Syntax.let_ "make" body
+      | Shape.Structure [] | Shape.List _ | Shape.Enum _ -> None, None
       | Shape.Structure members ->
           let rec mkfun (args : Structure.member list) body =
             match args with
@@ -129,56 +173,61 @@ let types is_ec2 shapes =
                       (fun a -> a.Structure.field_name, ident a.Structure.field_name)
                       members)))
           in
-          Syntax.let_ "make" (mkfun members body)
-      | Shape.List _ ->
-          Syntax.(
-            let_
-              "make"
-              (let elems = "elems" in
-               fun_ elems (fun_ "()" (ident elems))))
-      | Shape.Enum _ ->
-          Syntax.(
-            let_
-              "make"
-              (let v = "v" in
-               fun_ v (fun_ "()" (ident v))))
+          let ty =
+            List.fold_right
+              Syntax.(
+                fun Structure.{ required; field_name; shape; _ } ty ->
+                  let label =
+                    field_name |> if required then Syntax.label else Syntax.labelopt
+                  in
+                  let memty = Syntax.ty0 (String.capitalize_ascii shape ^ ".t") in
+                  tyfun ~label memty ty)
+              members
+              Syntax.(tyfun (ty0 "unit") (ty0 "t"))
+          in
+          Some (Syntax.let_ "make" (mkfun members body)), Some ty
       (* TODO: maybe accept a list of tuples and create a Hashtbl *)
-      | Shape.Map _ ->
-          Syntax.(
-            let_
-              "make"
-              (let elems = "elems" in
-               fun_ elems (fun_ "()" (ident elems))))
+      | Shape.Map _ -> None, None
     in
-    let extra =
+    let extra, tyextra =
       let open Syntax in
       match v.Shape.content with
       | Shape.Enum opts ->
-          [ let_
-              "str_to_t"
-              (list
-                 (List.map (fun o -> pair (str o) (ident (Util.to_variant_name o))) opts))
-          ; let_
-              "t_to_str"
-              (list
-                 (List.map (fun o -> pair (ident (Util.to_variant_name o)) (str o)) opts))
-          ; let_
-              "to_string"
-              (fun_
-                 "e"
-                 (app1
-                    "Util.of_option_exn"
-                    (app2 "Util.list_find" (ident "t_to_str") (ident "e"))))
-          ; let_
-              "of_string"
-              (fun_
-                 "s"
-                 (app1
-                    "Util.of_option_exn"
-                    (app2 "Util.list_find" (ident "str_to_t") (ident "s"))))
-          ]
-      | _ -> []
+          ( [ let_
+                "str_to_t"
+                (list
+                   (List.map
+                      (fun o -> pair (str o) (ident (Util.to_variant_name o)))
+                      opts))
+            ; let_
+                "t_to_str"
+                (list
+                   (List.map
+                      (fun o -> pair (ident (Util.to_variant_name o)) (str o))
+                      opts))
+            ; let_
+                "to_string"
+                (fun_
+                   "e"
+                   (app1
+                      "Aws.Util.of_option_exn"
+                      (app2 "Aws.Util.list_find" (ident "t_to_str") (ident "e"))))
+            ; let_
+                "of_string"
+                (fun_
+                   "s"
+                   (app1
+                      "Aws.Util.of_option_exn"
+                      (app2 "Aws.Util.list_find" (ident "str_to_t") (ident "s"))))
+            ]
+          , [ sigval "str_to_t" (ty0 "(string * t) list")
+            ; sigval "t_to_str" (ty0 "(t * string) list")
+            ; sigval "to_string" (tyfun (ty0 "t") (ty0 "string"))
+            ; sigval "of_string" (tyfun (ty0 "string") (ty0 "t"))
+            ] )
+      | _ -> [], []
     in
+    let typarse = Syntax.(tyfun (ty0 "Ezxmlm.nodes") (ty0 "t option")) in
     let parse =
       match v.Shape.content with
       | Shape.Structure [] -> Syntax.(let_ "parse" (fun_ "xml" (app1 "Some" (unit ()))))
@@ -201,13 +250,13 @@ let types is_ec2 shapes =
                   else
                     Syntax.(
                       app2
-                        "Util.option_bind"
-                        (app2 "Xml.member" (str loc_name) (ident "xml"))
+                        "Option.bind"
+                        (app2 "Aws.Xml.member" (str loc_name) (ident "xml"))
                         (ident (String.capitalize_ascii mem.Structure.shape ^ ".parse")))
                 in
                 let op =
                   if mem.Structure.required
-                  then Syntax.(app2 "Xml.required" (str loc_name) b)
+                  then Syntax.(app2 "Aws.Xml.required" (str loc_name) b)
                   else b
                 in
                 mem.Structure.field_name, op)
@@ -228,11 +277,11 @@ let types is_ec2 shapes =
               (fun_
                  "xml"
                  (app1
-                    "Util.option_all"
+                    "Aws.Util.option_all"
                     (app2
                        "List.map"
                        (ident (shp ^ ".parse"))
-                       (app2 "Xml.members" (str item_name) (ident "xml"))))))
+                       (app2 "Aws.Xml.members" (str item_name) (ident "xml"))))))
       | Shape.Enum _opts ->
           Syntax.(
             let_
@@ -240,10 +289,11 @@ let types is_ec2 shapes =
               (fun_
                  "xml"
                  (app2
-                    "Util.option_bind"
+                    "Option.bind"
                     (app1 "String.parse" (ident "xml"))
-                    (fun_ "s" (app2 "Util.list_find" (ident "str_to_t") (ident "s"))))))
+                    (fun_ "s" (app2 "Aws.Util.list_find" (ident "str_to_t") (ident "s"))))))
     in
+    let tyto_query = Syntax.(tyfun (ty0 "t") (ty0 "Aws.Query.t")) in
     let to_query =
       Syntax.(
         let_
@@ -253,9 +303,9 @@ let types is_ec2 shapes =
              (match v.Shape.content with
              | Shape.Structure s ->
                  app1
-                   "Query.List"
+                   "Aws.Query.List"
                    (app1
-                      "Util.list_filter_opt"
+                      "Aws.Util.list_filter_opt"
                       (list
                          (List.map
                             (fun mem ->
@@ -277,7 +327,7 @@ let types is_ec2 shapes =
                               in
                               let q arg =
                                 app1
-                                  "Query.Pair"
+                                  "Aws.Query.Pair"
                                   (pair
                                      (str location)
                                      (app1
@@ -290,27 +340,28 @@ let types is_ec2 shapes =
                                 app1 "Some" (q (ident ("v." ^ mem.Structure.field_name)))
                               else
                                 app2
-                                  "Util.option_map"
-                                  (ident ("v." ^ mem.Structure.field_name))
-                                  (fun_ "f" (q (ident "f"))))
+                                  "Option.map"
+                                  (fun_ "f" (q (ident "f")))
+                                  (ident ("v." ^ mem.Structure.field_name)))
                             s)))
              | Shape.List (shp, _, _flatten) ->
-                 app2 "Query.to_query_list" (ident (shp ^ ".to_query")) (ident "v")
+                 app2 "Aws.Query.to_query_list" (ident (shp ^ ".to_query")) (ident "v")
              | Shape.Map ((key_shp, _), (val_shp, _)) ->
                  app3
-                   "Query.to_query_hashtbl"
+                   "Aws.Query.to_query_hashtbl"
                    (ident (key_shp ^ ".to_string"))
                    (ident (val_shp ^ ".to_query"))
                    (ident "v")
              | Shape.Enum _ ->
                  app1
-                   "Query.Value"
+                   "Aws.Query.Value"
                    (app1
                       "Some"
                       (app1
-                         "Util.of_option_exn"
-                         (app2 "Util.list_find" (ident "t_to_str") (ident "v")))))))
+                         "Aws.Util.of_option_exn"
+                         (app2 "Aws.Util.list_find" (ident "t_to_str") (ident "v")))))))
     in
+    let tyto_json = Syntax.(tyfun (ty0 "t") (ty0 "Aws.Json.t")) in
     let to_json =
       Syntax.(
         let_
@@ -322,7 +373,7 @@ let types is_ec2 shapes =
                  variant1
                    "Assoc"
                    (app1
-                      "Util.list_filter_opt"
+                      "Aws.Util.list_filter_opt"
                       (list
                          (List.map
                             (fun mem ->
@@ -344,9 +395,9 @@ let types is_ec2 shapes =
                                 app1 "Some" (q (ident ("v." ^ mem.Structure.field_name)))
                               else
                                 app2
-                                  "Util.option_map"
-                                  (ident ("v." ^ mem.Structure.field_name))
-                                  (fun_ "f" (q (ident "f"))))
+                                  "Option.map"
+                                  (fun_ "f" (q (ident "f")))
+                                  (ident ("v." ^ mem.Structure.field_name)))
                             s)))
              | Shape.List (shp, _, _flatten) ->
                  variant1 "List" (app2 "List.map" (ident (shp ^ ".to_json")) (ident "v"))
@@ -370,9 +421,10 @@ let types is_ec2 shapes =
                  app1
                    "String.to_json"
                    (app1
-                      "Util.of_option_exn"
-                      (app2 "Util.list_find" (ident "t_to_str") (ident "v"))))))
+                      "Aws.Util.of_option_exn"
+                      (app2 "Aws.Util.list_find" (ident "t_to_str") (ident "v"))))))
     in
+    let tyof_json = Syntax.(tyfun (ty0 "Aws.Json.t") (ty0 "t")) in
     let of_json =
       Syntax.(
         let_
@@ -398,47 +450,77 @@ let types is_ec2 shapes =
                             fun v ->
                             app1
                               (String.capitalize_ascii mem.Structure.shape ^ ".of_json")
-                              (app1 "Util.of_option_exn" v)
+                              (app1 "Aws.Util.of_option_exn" v)
                           else
                             fun v ->
                             app2
-                              "Util.option_map"
-                              v
-                              (ident (mem.Structure.shape ^ ".of_json")))
-                            (app2 "Json.lookup" (ident "j") (str location)) ))
+                              "Option.map"
+                              (ident
+                                 (String.capitalize_ascii mem.Structure.shape ^ ".of_json"))
+                              v)
+                            (app2 "Aws.Json.lookup" (ident "j") (str location)) ))
                       s)
              | Shape.List (shp, _, _flatten) ->
-                 app2 "Json.to_list" (ident (shp ^ ".of_json")) (ident "j")
+                 app2 "Aws.Json.to_list" (ident (shp ^ ".of_json")) (ident "j")
              | Shape.Map ((key_shp, _), (val_shp, _)) ->
                  app3
-                   "Json.to_hashtbl"
+                   "Aws.Json.to_hashtbl"
                    (ident (key_shp ^ ".of_string"))
                    (ident (val_shp ^ ".of_json"))
                    (ident "j")
              | Shape.Enum _ ->
                  app1
-                   "Util.of_option_exn"
+                   "Aws.Util.of_option_exn"
                    (app2
-                      "Util.list_find"
+                      "Aws.Util.list_find"
                       (ident "str_to_t")
                       (app1 "String.of_json" (ident "j"))))))
     in
-    Syntax.module_
-      (String.capitalize_ascii v.Shape.name)
-      ([ ty ] @ extra @ [ make; parse; to_query; to_json; of_json ])
+    ( String.capitalize_ascii v.Shape.name
+    , [ Syntax.ty_ ty ]
+      @ extra
+      @ List.filter_map
+          (fun o -> o)
+          [ make; Some parse; Some to_query; Some to_json; Some of_json ]
+    , List.filter_map
+        (fun o -> o)
+        [ Some (Syntax.sty_ ty)
+        ; Option.map Syntax.(sigval "make") tymake
+        ; Some (Syntax.sigval "parse" typarse)
+        ; Some (Syntax.sigval "to_query" tyto_query)
+        ; Some (Syntax.sigval "to_json" tyto_json)
+        ; Some (Syntax.sigval "of_json" tyof_json)
+        ]
+      @ tyextra
+      |> Syntax.sig_ )
   in
-  let modules = List.map build_module (toposort shapes) in
-  let imports =
-    [ Syntax.open_ "Aws"
-    ; Syntax.modlet "Query" "Aws.Query"
-    ; Syntax.open_ "Aws.BaseTypes"
-    ; Syntax.open_ "CalendarLib"
-    ; Syntax.(tylet "calendar" (ty0 "Calendar.t"))
+  let header =
+    [ Syntax.open_ "Aws.BaseTypes"
+    ; Syntax.(tylet "calendar" (ty0 "CalendarLib.Calendar.t"))
     ]
   in
-  imports @ modules
+  scc shapes
+  |> ListLabels.fold_left ~init:header ~f:(fun acc g ->
+         match g with
+         | `Rec group ->
+             acc
+             @ [ ListLabels.map group ~f:(fun m ->
+                     let modname, m', sig_ = build_module m in
+                     Syntax.module'_ modname m' sig_)
+                 |> Syntax.rec_module_
+               ]
+         | `Nonrec m ->
+             let modname, m', _ = build_module m in
+             acc @ [ Syntax.module_ modname m' ])
 
-let op service version target_prefix _shapes op signature_version =
+let op service version target_prefix _shapes protocol op signature_version =
+  let protocol =
+    match protocol with
+    | "query" | "rest-xml" | "ec2" -> `Query
+    | "json" -> `Json
+    | _ -> failwith (Format.sprintf "unsupported protocol: %s" protocol)
+  in
+
   let open Syntax in
   let with_types shp fld = String.concat "." [ "Types"; shp; fld ] in
   let headers =
@@ -462,11 +544,11 @@ let op service version target_prefix _shapes op signature_version =
             "List.append"
             default_params
             (app1
-               "Util.drop_empty"
+               "Aws.Util.drop_empty"
                (app1
                   "Uri.query_of_encoded"
                   (app1
-                     "Query.render"
+                     "Aws.Query.render"
                      (app1 (with_types input_shape "to_query") (ident "req")))))
         in
         let body =
@@ -496,29 +578,94 @@ let op service version target_prefix _shapes op signature_version =
   in
   (* XXX(serious): assume xml -> json by default  *)
   let of_body =
-    match op.Operation.output_shape with
-    | None -> variant1 "Ok" (variant1 "Assoc" (list []))
-    | Some shp ->
-        try_msg
-          "Json.Parse_error"
-          (variant1 "Ok" (app1 "Json.of_string" (ident "body")))
-          (letom
-             "Error"
-             (variant1
-                "Error"
-                (app1
-                   "BadResponse"
-                   (record
-                      [ "body", ident "body"
-                      ; ( "message"
-                        , app2
-                            "^"
-                            (str
-                               ("Error parsing "
-                               ^ shp
-                               ^ " - missing field in body or children: "))
-                            (ident "msg") )
-                      ]))))
+    match protocol with
+    | `Query -> (
+        match op.Operation.output_shape with
+        | None -> variant1 "Ok" (ident "()")
+        | Some shp ->
+            tryfail
+              (letin
+                 "xml"
+                 (app1 "Ezxmlm.from_string" (ident "body"))
+                 (letin
+                    "resp"
+                    (let r =
+                       app2
+                         "Aws.Xml.member"
+                         (str (op.Operation.name ^ "Response"))
+                         (app1 "snd" (ident "xml"))
+                     in
+                     match op.Operation.output_wrapper with
+                     | None -> r
+                     | Some w -> app2 "Option.bind" r (app1 "Aws.Xml.member" (str w)))
+                    (try_msg
+                       "Aws.Xml.RequiredFieldMissing"
+                       (app2
+                          "Aws.Util.or_error"
+                          (app2
+                             "Option.bind"
+                             (ident "resp")
+                             (ident (with_types shp "parse")))
+                          (letom
+                             "Error"
+                             (app1
+                                "BadResponse"
+                                (record
+                                   [ "body", ident "body"
+                                   ; ( "message"
+                                     , str ("Could not find well formed " ^ shp ^ ".") )
+                                   ]))))
+                       (letom
+                          "Error"
+                          (variant1
+                             "Error"
+                             (app1
+                                "BadResponse"
+                                (record
+                                   [ "body", ident "body"
+                                   ; ( "message"
+                                     , app2
+                                         "^"
+                                         (str
+                                            ("Error parsing "
+                                            ^ shp
+                                            ^ " - missing field in body or children: "))
+                                         (ident "msg") )
+                                   ])))))))
+              (variant1
+                 "Error"
+                 (letom
+                    "Error"
+                    (app1
+                       "BadResponse"
+                       (record
+                          [ "body", ident "body"
+                          ; "message", app2 "^" (str "Error parsing xml: ") (ident "msg")
+                          ])))))
+    | `Json -> (
+        match op.Operation.output_shape with
+        | None -> variant1 "Ok" (variant1 "Assoc" (list []))
+        | Some shp ->
+            try_msg
+              "Aws.Json.Parse_error"
+              (variant1 "Ok" (app1 "Aws.Json.of_string" (ident "body")))
+              (letom
+                 "Error"
+                 (variant1
+                    "Error"
+                    (app1
+                       "BadResponse"
+                       (record
+                          [ "body", ident "body"
+                          ; ( "message"
+                            , app2
+                                "^"
+                                (str
+                                   ("Error parsing "
+                                   ^ shp
+                                   ^ " - missing field in body or children: "))
+                                (ident "msg") )
+                          ])))))
   in
   let op_error_parse =
     letin
@@ -550,7 +697,12 @@ let op service version target_prefix _shapes op signature_version =
     | Some i -> ty0 (with_types i "t")
     | None -> unit
   in
-  let output_type = ty0 "Aws.Json.t" in
+  let output_type =
+    match protocol, op.Operation.output_shape with
+    | `Query, Some shp -> ty0 (with_types shp "t")
+    | `Query, None -> ty0 "unit"
+    | `Json, _ -> ty0 "Aws.Json.t"
+  in
   (* Tuple corresponding to (mli, ml) *)
   ( [ stylet "input" input_type
     ; stylet "output" output_type
