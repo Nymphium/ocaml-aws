@@ -44,31 +44,35 @@ let run_request
        and type output = output
        and type error = error)
     (inp : M.input) =
-  let meth, uri, headers, body =
+  let headers, uri =
     match M.signature_version with
     | V4 | S3 ->
-        Aws.Signing.sign_request
+        Aws.Signing.sign_request_header
           ~access_key
           ~secret_key
           ?token
           ~service:M.service
           ~region
-          (M.to_http M.service region inp)
+          ~meth:M.meth
+          M.target
     | V2 ->
-        Aws.Signing.sign_v2_request
-          ~access_key
-          ~secret_key
-          ?token
-          ~service:M.service
-          ~region
-          (M.to_http M.service region inp)
+        let _, uri, headers, _ =
+          Aws.Signing.sign_v2_request
+            ~access_key
+            ~secret_key
+            ?token
+            ~service:M.service
+            ~region
+            (M.to_http M.service region inp)
+        in
+        headers, uri
   in
   let open Cohttp in
   let headers = Header.of_list headers in
   Lwt.catch
     (fun () ->
-      let body = Aws.Util.option_map body Cohttp_lwt.Body.of_string in
-      Cohttp_lwt_unix.Client.call ~headers meth uri ?body
+      let body = inp |> M.request_body_of_input |> Cohttp_lwt.Body.of_string in
+      Cohttp_lwt_unix.Client.call ~headers M.meth uri ~body
       >>= fun (resp, body) ->
       Cohttp_lwt.Body.to_string body
       >|= fun body ->

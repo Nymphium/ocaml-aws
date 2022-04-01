@@ -560,6 +560,7 @@ let op service version target_prefix _shapes protocol op signature_version =
         in
         params, body
   in
+  let meth = variant op.Operation.http_meth in
   let to_body =
     letin
       "body"
@@ -567,13 +568,12 @@ let op service version target_prefix _shapes protocol op signature_version =
       (letin
          "uri"
          (app1
-               "Uri.of_string"
-               (app1
-                  "Aws.Util.of_option_exn"
-                  (app2 "Aws.Endpoints.url_of" (ident "service") (ident "region"))))
-         (tuple [ variant op.Operation.http_meth; ident "uri"; headers; ident "body" ]))
+            "Uri.of_string"
+            (app1
+               "Aws.Util.of_option_exn"
+               (app2 "Aws.Endpoints.url_of" (ident "service") (ident "region"))))
+         (tuple [ ident "meth"; ident "uri"; ident "headers"; ident "body" ]))
   in
-  (* XXX(serious): assume xml -> json by default  *)
   let of_body =
     match protocol with
     | `Query -> (
@@ -603,39 +603,36 @@ let op service version target_prefix _shapes protocol op signature_version =
                              "Option.bind"
                              (ident "resp")
                              (ident (with_types shp "parse")))
-                          (
-                             (app1
-                                "Aws.Error.BadResponse"
-                                (record
-                                   [ "body", ident "body"
-                                   ; ( "message"
-                                     , str ("Could not find well formed " ^ shp ^ ".") )
-                                   ]))))
-                       (
-                          (variant1
-                             "Error"
-                             (app1
-                                "Aws.Error.BadResponse"
-                                (record
-                                   [ "body", ident "body"
-                                   ; ( "message"
-                                     , app2
-                                         "^"
-                                         (str
-                                            ("Error parsing "
-                                            ^ shp
-                                            ^ " - missing field in body or children: "))
-                                         (ident "msg") )
-                                   ])))))))
+                          (app1
+                             "Aws.Error.BadResponse"
+                             (record
+                                [ "body", ident "body"
+                                ; ( "message"
+                                  , str ("Could not find well formed " ^ shp ^ ".") )
+                                ])))
+                       (variant1
+                          "Error"
+                          (app1
+                             "Aws.Error.BadResponse"
+                             (record
+                                [ "body", ident "body"
+                                ; ( "message"
+                                  , app2
+                                      "^"
+                                      (str
+                                         ("Error parsing "
+                                         ^ shp
+                                         ^ " - missing field in body or children: "))
+                                      (ident "msg") )
+                                ]))))))
               (variant1
                  "Error"
-                 (
-                    (app1
-                       "Aws.Error.BadResponse"
-                       (record
-                          [ "body", ident "body"
-                          ; "message", app2 "^" (str "Error parsing xml: ") (ident "msg")
-                          ])))))
+                 (app1
+                    "Aws.Error.BadResponse"
+                    (record
+                       [ "body", ident "body"
+                       ; "message", app2 "^" (str "Error parsing xml: ") (ident "msg")
+                       ]))))
     | `Json -> (
         match op.Operation.output_shape with
         | None -> variant1 "Ok" (variant1 "Assoc" (list []))
@@ -643,56 +640,62 @@ let op service version target_prefix _shapes protocol op signature_version =
             try_msg
               "Aws.Json.Parse_error"
               (variant1 "Ok" (app1 "Aws.Json.of_string" (ident "body")))
-              (
-                 (variant1
-                    "Error"
-                    (app1
-                       "Aws.Error.BadResponse"
-                       (record
-                          [ "body", ident "body"
-                          ; ( "message"
-                            , app2
-                                "^"
-                                (str
-                                   ("Error parsing "
-                                   ^ shp
-                                   ^ " - missing field in body or children: "))
-                                (ident "msg") )
-                          ])))))
+              (variant1
+                 "Error"
+                 (app1
+                    "Aws.Error.BadResponse"
+                    (record
+                       [ "body", ident "body"
+                       ; ( "message"
+                         , app2
+                             "^"
+                             (str
+                                ("Error parsing "
+                                ^ shp
+                                ^ " - missing field in body or children: "))
+                             (ident "msg") )
+                       ]))))
+  in
+  let errors =
+    List.fold_left
+      (fun ls name ->
+        app2 "::" (ident ("Errors_internal." ^ Util.to_variant_name name)) ls)
+      (ident "Errors_internal.common")
+      op.Operation.errors
   in
   let op_error_parse =
-    letin
-      "errors"
-      (app2
-         "@"
-         (list
-            (List.map
-               (fun name -> ident ("Errors_internal." ^ Util.to_variant_name name))
-               op.Operation.errors))
-         (ident "Errors_internal.common"))
-      (matchoption
-         (app1 "Errors_internal.of_string" (ident "err"))
-         (ifthen
-            (app2
-               "&&"
-               (app2 "List.mem" (ident "var") (ident "errors"))
-               (matchoption
-                  (app1 "Errors_internal.to_http_code" (ident "var"))
-                  (app2 "=" (ident "var") (ident "code"))
-                  (ident "true")))
-            (app1 "Some" (ident "var"))
-            (ident "None"))
+    matchoption
+      (app1 "Errors_internal.of_string" (ident "err"))
+      (ifthen
+         (app2
+            "&&"
+            (app2 "List.mem" (ident "var") (ident "errors"))
+            (matchoption
+               (app1 "Errors_internal.to_http_code" (ident "var"))
+               (app2 "=" (ident "var") (ident "code"))
+               (ident "true")))
+         (app1 "Some" (ident "var"))
          (ident "None"))
+      (ident "None")
   in
   let unit = ty0 "unit" in
-  let input_type =
-    match op.Operation.input_shape with
-    | Some i -> ty0 (with_types i "t")
-    | None -> unit
+  let input_type, request_body_of_input =
+    match protocol, op.Operation.input_shape with
+    | `Query, Some i ->
+        ( ty0 (with_types i "t")
+        , fun_
+            "input"
+            (app1 "Aws.Query.render" (app1 (with_types i "to_query") (ident "input"))) )
+    | `Json, Some i ->
+        ( ty0 (with_types i "t")
+        , fun_
+            "input"
+            (app1 "Aws.Json.to_string" (app1 (with_types i "to_json") (ident "input"))) )
+    | _, None -> unit, fun_ "()" (ident "{}")
   in
   let output_type =
     match protocol, op.Operation.output_shape with
-    | `Query, Some shp -> ty0 (with_types shp "t")
+    | `Query, Some o -> ty0 (with_types o "t")
     | `Query, None -> ty0 "unit"
     | `Json, _ -> ty0 "Aws.Json.t"
   in
@@ -704,9 +707,10 @@ let op service version target_prefix _shapes protocol op signature_version =
         "Aws.Call"
         [ withty "input" "input"; withty "output" "output"; withty "error" "error" ]
     ]
-  , [  tylet "input" input_type
+  , [ tylet "input" input_type
     ; tylet "output" output_type
     ; tylet "error" (ty0 "Errors_internal.t")
+    ; let_ "request_body_of_input" request_body_of_input
     ; let_ "service" (str service)
     ]
     @ (match target_prefix with
@@ -716,8 +720,11 @@ let op service version target_prefix _shapes protocol op signature_version =
     @ [ let_
           "signature_version"
           (ident ("Aws.Request." ^ String.capitalize_ascii signature_version))
+      ; let_ "headers" headers
+      ; let_ "meth" meth
       ; let_ "to_http" (fun3 "service" "region" "req" to_body)
       ; let_ "of_http" (fun_ "body" of_body)
+      ; let_ "errors" errors
       ; let_ "parse_error" (fun2 "code" "err" op_error_parse)
       ] )
 

@@ -52,10 +52,9 @@ let get_signature_key =
 (* NOTE(dbp 2015-01-13): This is a direct translation of reference implementation at:
  * http://docs.aws.amazon.com/general/latest/gr/sigv4-signed-request-examples.html
  *)
-let sign_request ~access_key ~secret_key ?token ~service ~region (meth, uri, headers, body)
-    =
-  let host = Util.of_option_exn (Endpoints.endpoint_of service region) in
-  (* let params = encode_query (Uri.query uri) in *)
+let sign_request_header ~access_key ~secret_key ?token ~service ~region ~meth target =
+  let uri = Endpoints.url_of service region |> Util.of_option_exn |> Uri.of_string in
+  let host = Uri.host uri |> Util.of_option_exn in
   let now = Time.now_utc () in
   let amzdate = Time.date_time now in
   let datestamp = Time.date_yymmdd now in
@@ -65,16 +64,19 @@ let sign_request ~access_key ~secret_key ?token ~service ~region (meth, uri, hea
     match token with
     | Some t ->
         let th = String.concat "" [ "x-amz-security-token:"; t; "\n" ] in
-        let sh = "host;x-amz-content-sha256;x-amz-date;x-amz-security-token" in
+        let sh =
+          "host;x-amz-content-sha256;x-amz-date;x-amz-target;x-amz-security-token"
+        in
         th, sh
-    | None -> "", "host;x-amz-content-sha256;x-amz-date"
+    | None -> "", "host;x-amz-content-sha256;x-amz-date;x-amz-target"
   in
   let canonical_headers =
     Format.sprintf
-      "host:%s\nx-amz-content-sha256:%s\nx-amz-date:%s\n%s"
+      "host:%s\nx-amz-content-sha256:%s\nx-amz-date:%s\nx-amz-target:%s\n%s"
       host
       Hash.content_sha256
       amzdate
+      target
       token_header
   in
   let canonical_request_sign =
@@ -114,17 +116,18 @@ let sign_request ~access_key ~secret_key ?token ~service ~region (meth, uri, hea
       ]
   in
   let headers =
-    ("x-amz-date", amzdate)
-    :: ("x-amz-content-sha256", Hash.content_sha256)
-    :: ("Authorization", authorization_header)
-    :: headers
+    [ "x-amz-date", amzdate
+    ; "x-amz-content-sha256", Hash.content_sha256
+    ; "x-amz-target", target
+    ; "Authorization", authorization_header
+    ]
   in
   let full_headers =
     match token with
     | Some t -> ("X-Amz-Security-Token", t) :: headers
     | None -> headers
   in
-  meth, uri, full_headers, body
+  full_headers, uri
 
 let sign_v2_request
     ~access_key

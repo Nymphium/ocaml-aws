@@ -114,49 +114,6 @@ module Request : sig
   (** A request is a method, a uri, a headers, and a request body. *)
 end
 
-(** All AWS api operations should have type Call. Runtime
-    implementation should take as input modules of type Call. *)
-module type Call = sig
-  type input
-  (** The native OCaml datatype input to the Call. *)
-
-  type output
-  (** The native OCaml datatype that is produced as output to a
-      successful Call. *)
-
-  type error
-  (** The native OCaml error type. This is shared between all calls
-      for a single API. *)
-
-  val signature_version : Request.signature_version
-  (** The signing method to use for the Call. *)
-
-  val service : string
-  (** The AWS service, for example, 'ec2'. This is used for request
-      signing, and to determine the endpoint to send the request. *)
-
-  val to_http : string -> string -> input -> Request.t
-  (** This function converts the native input into the HTTP request
-      type. In particular, it is responsible for properly encoding the
-      request type into query format. It also sets the Action and
-      Version query parameters. *)
-
-  val of_http : string -> [ `Ok of output | `Error of error Error.error_response ]
-  (** This function converts from a HTTP response body to an output
-      or an error if the response could not be decoded. *)
-
-  val parse_error : int -> string -> error option
-  (** This function parses an AWS error (which has been successfully
-      deserialized from XML) into an API specific native error that
-      could have been triggered by this call. It should fail to parse
-      if the error it is given is not one of those listen in the
-      specification, or if the passed HTTP status code does not match
-      the specified one. *)
-end
-
-type ('i, 'o, 'e) call =
-  (module Call with type input = 'i and type output = 'o and type error = 'e)
-
 (** This module provides parsing / formatting for AWS style timestamps.
     For example: 2013-05-24T21:15:31.000Z
     It does not parse the milliseconds (it just truncates them). *)
@@ -203,6 +160,59 @@ module Query : sig
 
   val to_query_hashtbl : ('a -> string) -> ('b -> t) -> ('a, 'b) Hashtbl.t -> t
 end
+
+(** All AWS api operations should have type Call. Runtime
+    implementation should take as input modules of type Call. *)
+module type Call = sig
+  type input
+  (** The native OCaml datatype input to the Call. *)
+
+  type output
+  (** The native OCaml datatype that is produced as output to a
+      successful Call. *)
+
+  type error
+  (** The native OCaml error type. This is shared between all calls
+      for a single API. *)
+
+  val signature_version : Request.signature_version
+  (** The signing method to use for the Call. *)
+
+  val service : string
+  (** The AWS service, for example, 'ec2'. This is used for request
+      signing, and to determine the endpoint to send the request. *)
+
+  val target : string
+  (** The target to call, for example, 'DynamoDB_20120810.BatchGetItem'.
+    This is used for request header 'x-amz-target', which is used to detect
+    where to send a request. *)
+
+  val meth : Request.meth
+  (** The HTTP method to send request *)
+
+  val request_body_of_input : input -> string
+
+  val to_http : string -> string -> input -> Request.t
+  (** This function converts the native input into the HTTP request
+      type. In particular, it is responsible for properly encoding the
+      request type into query format. It also sets the Action and
+      Version query parameters. *)
+
+  val of_http : string -> [ `Ok of output | `Error of error Error.error_response ]
+  (** This function converts from a HTTP response body to an output
+      or an error if the response could not be decoded. *)
+
+  val parse_error : int -> string -> error option
+  (** This function parses an AWS error (which has been successfully
+      deserialized from XML) into an API specific native error that
+      could have been triggered by this call. It should fail to parse
+      if the error it is given is not one of those listen in the
+      specification, or if the passed HTTP status code does not match
+      the specified one. *)
+end
+
+type ('i, 'o, 'e) call =
+  (module Call with type input = 'i and type output = 'o and type error = 'e)
 
 (** This module contains helpers used for XML parsing. It wraps Ezxmlm
     and adds helpers. *)
@@ -310,17 +320,18 @@ module Signing : sig
 
   val encode_query : (string * string list) list -> string
 
-  val sign_request :
+  val sign_request_header :
        access_key:string
     -> secret_key:string
     -> ?token:string
     -> service:string
     -> region:string
-    -> Request.t
-    -> Request.t
-  (** Given a service, region, and request, produce a new request with
-      an Authorization header constructed according to the V4 Signing
-      algorithm. This code is a direct translation of the reference implementation
+    -> meth:Request.meth
+    -> string
+    -> Request.headers * Uri.t
+  (** Given a service, region, and request, produce a new request headers with
+      an Authorization constructed according to the V4 Signing
+      algorithm and uri. This code is a direct translation of the reference implementation
       from python provided at:
 
       http://docs.aws.amazon.com/general/latest/gr/sigv4-signed-request-examples.html

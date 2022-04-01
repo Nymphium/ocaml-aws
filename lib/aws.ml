@@ -53,6 +53,12 @@ module type Call = sig
 
   val service : string
 
+  val target : string
+
+  val meth : Request.meth
+
+  val request_body_of_input : input -> string
+
   val to_http : string -> string -> input -> Request.t
 
   val of_http : string -> [ `Ok of output | `Error of error Error.error_response ]
