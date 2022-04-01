@@ -1,5 +1,7 @@
+let algorithm = "AWS4-HMAC-SHA256"
+
 module Hash = struct
-  let _sha256 ?key str =
+  let[@inline] _sha256 ?key str =
     match key with
     | Some key -> Digestif.SHA256.hmac_string ~key str
     | None -> Digestif.SHA256.digest_string str
@@ -9,6 +11,8 @@ module Hash = struct
   let sha256_hex ?key str = _sha256 ?key str |> Digestif.SHA256.to_hex
 
   let sha256_base64 ?key str = Base64.encode_string @@ sha256 ?key str
+
+  let content_sha256 = sha256_hex ""
 end
 
 let encode_query ps =
@@ -20,7 +24,7 @@ let encode_query ps =
             ~component:`Authority causes it to use.
   *)
   let encoded =
-    List.map
+    List.rev_map
       (fun (k, v) ->
         let key = Uri.pct_encode ~component:`Authority k in
         let value =
@@ -32,9 +36,18 @@ let encode_query ps =
         key, value)
       ps
   in
-  let sorted = List.sort (fun a b -> compare (fst a) (fst b)) encoded in
-  let joined = List.map (fun (k, v) -> k ^ "=" ^ v) sorted in
+  let sorted = List.sort (fun a b -> compare (fst b) (fst a)) encoded in
+  let joined = List.rev_map (fun (k, v) -> k ^ "=" ^ v) sorted in
   String.concat "&" joined
+
+let get_signature_key =
+  let[@inline] sign msg key = Hash.sha256 ~key msg in
+  fun key date region service ->
+    String.concat "" [ "AWS4"; key ]
+    |> sign date
+    |> sign "aws4_request"
+    |> sign service
+    |> sign region
 
 (* NOTE(dbp 2015-01-13): This is a direct translation of reference implementation at:
  * http://docs.aws.amazon.com/general/latest/gr/sigv4-signed-request-examples.html
@@ -42,62 +55,44 @@ let encode_query ps =
 let sign_request ~access_key ~secret_key ?token ~service ~region (meth, uri, headers, body)
     =
   let host = Util.of_option_exn (Endpoints.endpoint_of service region) in
-  let params = encode_query (Uri.query uri) in
-  let sign key msg = Hash.sha256 ~key msg in
-  let get_signature_key key date region service =
-    sign (sign (sign (sign ("AWS4" ^ key) date) region) service) "aws4_request"
-  in
+  (* let params = encode_query (Uri.query uri) in *)
   let now = Time.now_utc () in
   let amzdate = Time.date_time now in
   let datestamp = Time.date_yymmdd now in
   let canonical_uri = "/" in
-  let canonical_querystring = params in
-  let payload_hash = Hash.sha256_hex "" in
-  let token_header, sig_header =
+  (* let canonical_querystring = params in *)
+  let token_header, signed_headers =
     match token with
     | Some t ->
-        let th = "x-amz-security-token:" ^ t ^ "\n" in
-        let sh = ";x-amz-security-token" in
+        let th = String.concat "" [ "x-amz-security-token:"; t; "\n" ] in
+        let sh = "host;x-amz-content-sha256;x-amz-date;x-amz-security-token" in
         th, sh
-    | None -> "", ""
+    | None -> "", "host;x-amz-content-sha256;x-amz-date"
   in
   let canonical_headers =
-    "host:"
-    ^ host
-    ^ "\n"
-    ^ "x-amz-content-sha256:"
-    ^ payload_hash
-    ^ "\nx-amz-date:"
-    ^ amzdate
-    ^ "\n"
-    ^ token_header
+    Format.sprintf
+      "host:%s\nx-amz-content-sha256:%s\nx-amz-date:%s\n%s"
+      host
+      Hash.content_sha256
+      amzdate
+      token_header
   in
-  let signed_headers = "host;x-amz-content-sha256;x-amz-date" ^ sig_header in
-  let canonical_request =
-    Request.string_of_meth meth
-    ^ "\n"
-    ^ canonical_uri
-    ^ "\n"
-    ^ canonical_querystring
-    ^ "\n"
-    ^ canonical_headers
-    ^ "\n"
-    ^ signed_headers
-    ^ "\n"
-    ^ payload_hash
+  let canonical_request_sign =
+    Hash.sha256_hex
+    @@ String.concat
+         "\n"
+         [ Request.string_of_meth meth
+         ; canonical_uri (* ; canonical_querystring *)
+         ; canonical_headers
+         ; signed_headers
+         ; Hash.content_sha256
+         ]
   in
-  let algorithm = "AWS4-HMAC-SHA256" in
   let credential_scope =
-    datestamp ^ "/" ^ region ^ "/" ^ service ^ "/" ^ "aws4_request"
+    String.concat "/" [ datestamp; region; service; "aws4_request" ]
   in
   let string_to_sign =
-    algorithm
-    ^ "\n"
-    ^ amzdate
-    ^ "\n"
-    ^ credential_scope
-    ^ "\n"
-    ^ Hash.sha256_hex canonical_request
+    String.concat "\n" [ algorithm; amzdate; credential_scope; canonical_request_sign ]
   in
   let signing_key = get_signature_key secret_key datestamp region service in
   let signature = Hash.sha256_hex ~key:signing_key string_to_sign in
@@ -120,7 +115,7 @@ let sign_request ~access_key ~secret_key ?token ~service ~region (meth, uri, hea
   in
   let headers =
     ("x-amz-date", amzdate)
-    :: ("x-amz-content-sha256", payload_hash)
+    :: ("x-amz-content-sha256", Hash.content_sha256)
     :: ("Authorization", authorization_header)
     :: headers
   in
@@ -157,8 +152,8 @@ let sign_v2_request
   let params = encode_query (Uri.query query) in
   let canonical_uri = "/" in
   let string_to_sign =
-    Request.string_of_meth meth ^ "\n" ^ host ^ "\n" ^ canonical_uri ^ "\n" ^ params
+    String.concat "\n" [ Request.string_of_meth meth; host; canonical_uri; params ]
   in
-  let signature = Base64.encode_string @@ Hash.sha256 ~key:secret_key string_to_sign in
+  let signature = Hash.sha256_base64 ~key:secret_key string_to_sign in
   let new_uri = Uri.add_query_param' query ("Signature", signature) in
   meth, new_uri, headers, body
