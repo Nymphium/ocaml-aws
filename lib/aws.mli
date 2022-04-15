@@ -328,6 +328,7 @@ module Signing : sig
     -> region:string
     -> meth:Request.meth
     -> string
+    -> string
     -> Request.headers * Uri.t
   (** Given a service, region, and request, produce a new request headers with
       an Authorization constructed according to the V4 Signing

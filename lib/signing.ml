@@ -45,49 +45,58 @@ let get_signature_key =
   fun key date region service ->
     String.concat "" [ "AWS4"; key ]
     |> sign date
-    |> sign "aws4_request"
-    |> sign service
     |> sign region
+    |> sign service
+    |> sign "aws4_request"
 
 (* NOTE(dbp 2015-01-13): This is a direct translation of reference implementation at:
  * http://docs.aws.amazon.com/general/latest/gr/sigv4-signed-request-examples.html
  *)
-let sign_request_header ~access_key ~secret_key ?token ~service ~region ~meth target =
+let sign_request_header
+    ~access_key
+    ~secret_key
+    ?token
+    ~service
+    ~region
+    ~meth
+    target
+    params =
   let uri = Endpoints.url_of service region |> Util.of_option_exn |> Uri.of_string in
   let host = Uri.host uri |> Util.of_option_exn in
   let now = Time.now_utc () in
   let amzdate = Time.date_time now in
   let datestamp = Time.date_yymmdd now in
   let canonical_uri = "/" in
-  (* let canonical_querystring = params in *)
+  let content_type = "application/x-amz-json-1.0" in
+  let canonical_querystring = "" in
   let token_header, signed_headers =
     match token with
     | Some t ->
         let th = String.concat "" [ "x-amz-security-token:"; t; "\n" ] in
-        let sh =
-          "host;x-amz-content-sha256;x-amz-date;x-amz-target;x-amz-security-token"
-        in
+        let sh = "content-type;host;x-amz-date;x-amz-security-token;x-amz-target" in
         th, sh
-    | None -> "", "host;x-amz-content-sha256;x-amz-date;x-amz-target"
+    | None -> "", "content-type;host;x-amz-date;x-amz-target"
   in
   let canonical_headers =
+    (* Header names must be trimmed and lowercase, and sorted in code point order from low to high. *)
     Format.sprintf
-      "host:%s\nx-amz-content-sha256:%s\nx-amz-date:%s\nx-amz-target:%s\n%s"
+      "content-type:%s\nhost:%s\nx-amz-date:%s\n%sx-amz-target:%s\n"
+      content_type
       host
-      Hash.content_sha256
       amzdate
-      target
       token_header
+      target
   in
   let canonical_request_sign =
     Hash.sha256_hex
     @@ String.concat
          "\n"
          [ Request.string_of_meth meth
-         ; canonical_uri (* ; canonical_querystring *)
+         ; canonical_uri
+         ; canonical_querystring
          ; canonical_headers
          ; signed_headers
-         ; Hash.content_sha256
+         ; Hash.sha256_hex params
          ]
   in
   let credential_scope =
@@ -102,29 +111,27 @@ let sign_request_header ~access_key ~secret_key ?token ~service ~region ~meth ta
     String.concat
       ""
       [ algorithm
-      ; " "
-      ; "Credential="
+      ; " Credential="
       ; access_key
       ; "/"
       ; credential_scope
-      ; ", "
-      ; "SignedHeaders="
+      ; ", SignedHeaders="
       ; signed_headers
-      ; ", "
-      ; "Signature="
+      ; ", Signature="
       ; signature
       ]
   in
   let headers =
-    [ "x-amz-date", amzdate
-    ; "x-amz-content-sha256", Hash.content_sha256
+    [ "host", host
+    ; "content-type", content_type
+    ; "x-amz-date", amzdate
     ; "x-amz-target", target
-    ; "Authorization", authorization_header
+    ; "authorization", authorization_header
     ]
   in
   let full_headers =
     match token with
-    | Some t -> ("X-Amz-Security-Token", t) :: headers
+    | Some t -> ("x-amz-security-token", t) :: headers
     | None -> headers
   in
   full_headers, uri

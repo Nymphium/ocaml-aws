@@ -44,6 +44,7 @@ let run_request
        and type output = output
        and type error = error)
     (inp : M.input) =
+  let body = M.request_body_of_input inp in
   let headers, uri =
     match M.signature_version with
     | V4 | S3 ->
@@ -55,6 +56,7 @@ let run_request
           ~region
           ~meth:M.meth
           M.target
+          body
     | V2 ->
         let _, uri, headers, _ =
           Aws.Signing.sign_v2_request

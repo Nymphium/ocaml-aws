@@ -2049,5 +2049,6 @@ let endpoint_of svc_name region =
   | _ -> None
 let url_of svc_name region =
   match endpoint_of svc_name region with
+  | Some "localhost:8000" -> Some ("http://localhost:8000")
   | Some var -> Some ("https://" ^ var)
   | None -> None
